@@ -31,54 +31,24 @@ const User = mongoose.model("User", userSchema);
 const bot = new Telegraf(process.env.Token || "");
 
 bot.catch((err, ctx) => {
-  console.error(
-    `[Telegraf Error Handled] Exception occurred on update_id: ${ctx?.update?.update_id}:`,
-    err.message || err
-  );
+  console.error(`[Telegraf Error] update_id: ${ctx?.update?.update_id}:`, err.message || err);
 });
 
-bot.use(
-  rateLimit({
-    window: 2000,
-    limit: 5,
-    onLimitExceeded: (ctx) => ctx.reply("Please avoid spamming the bot!").catch(() => {})
-  })
-);
+const limitConfig = {
+  window: 2000,
+  limit: 5,
+  onLimitExceeded: (ctx) => ctx.reply("Please avoid spamming the bot!").catch(() => {})
+};
+
+bot.use(rateLimit(limitConfig));
 
 const userRegistrationStates = new Map();
 const pairedPartners = new Map();
-const activeUsers = { Male: [], Female: [], Other: [], any: [] };
-
-const generateReferralCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
-
-const ensurePremiumActive = async (telegramId) => {
-  const user = await User.findOne({ telegramId });
-  if (!user || !user.isPremium) return false;
-
-  if (user.premiumExpiresAt && user.premiumExpiresAt.getTime() <= Date.now()) {
-    user.isPremium = false;
-    user.premiumExpiresAt = null;
-    await user.save();
-    return false;
-  }
-  return true;
-};
-
-const getReferralLink = async (telegramId) => {
-  const user = await User.findOne({ telegramId });
-  if (!user) return null;
-
-  if (!user.referralCode) {
-    let referralCode = generateReferralCode();
-    while (await User.exists({ referralCode })) {
-      referralCode = generateReferralCode();
-    }
-    user.referralCode = referralCode;
-    await user.save();
-  }
-
-  const botInfo = await bot.telegram.getMe();
-  return `https://t.me/${botInfo.username}?start=ref_${user.referralCode}`;
+const activeUsers = {
+  Male: [],
+  Female: [],
+  Other: [],
+  any: []
 };
 
 const mainMenuKeyboard = {
@@ -89,6 +59,42 @@ const mainMenuKeyboard = {
     ],
     resize_keyboard: true
   }
+};
+
+function generateReferralCode() {
+  return Math.random().toString(36).substring(2, 10).toUpperCase();
+}
+
+const getReferralLink = async (telegramId) => {
+  const user = await User.findOne({ telegramId });
+  if (!user) return null;
+
+  if (!user.referralCode) {
+    let newCode = generateReferralCode();
+    while (await User.exists({ referralCode: newCode })) {
+      newCode = generateReferralCode();
+    }
+    user.referralCode = newCode;
+    await user.save();
+  }
+
+  const botInfo = await bot.telegram.getMe();
+  return `https://t.me/${botInfo.username}?start=ref_${user.referralCode}`;
+};
+
+const ensurePremiumActive = async (telegramId) => {
+  const user = await User.findOne({ telegramId });
+  if (!user) return false;
+  if (!user.isPremium) return false;
+
+  if (user.premiumExpiresAt && user.premiumExpiresAt.getTime() <= Date.now()) {
+    user.isPremium = false;
+    user.premiumExpiresAt = null;
+    await user.save();
+    return false;
+  }
+
+  return true;
 };
 
 bot.start(async (ctx) => {
@@ -106,7 +112,7 @@ bot.start(async (ctx) => {
         await existingUser.save();
       }
       return ctx.reply(
-        `Welcome back, ${existingUser.name}! \n/search - To start search for a partner.`,
+        `Welcome back, ${existingUser.name}!\n\nUse /search to find a partner.`,
         mainMenuKeyboard
       );
     }
@@ -119,16 +125,25 @@ bot.start(async (ctx) => {
       }
     }
 
-    ctx.reply("Welcome to the ChatBot! Set up your profile to continue.\nPlease type your name:");
-    userRegistrationStates.set(tId, { step: "AWAITING_NAME", referredBy });
+    await ctx.reply(
+      "Welcome to the Anonymous Chat Bot!\n\n" +
+      "Let's create your profile.\n\n" +
+      "Please type your name:"
+    );
+
+    userRegistrationStates.set(tId, {
+      step: "AWAITING_NAME",
+      referredBy
+    });
   } catch (err) {
-    console.error(err);
+    console.error("Start error:", err);
     ctx.reply("An error occurred. Please try /start again.").catch(() => {});
   }
 });
 
 const sendReferralScreen = async (ctx) => {
   const tId = ctx.chat.id;
+
   try {
     const profile = await User.findOne({ telegramId: tId });
     if (!profile) {
@@ -141,14 +156,25 @@ const sendReferralScreen = async (ctx) => {
       `🔗 <b>Your referral link</b>\n` +
       `<code>${referralLink}</code>\n\n` +
       `👥 <b>Successful referrals:</b> ${profile.referralCount || 0}\n\n` +
-      `📣 Share your link with your friends. When a new user opens your link and completes their profile, the referral is counted.`;
+      `⭐ <b>Reward:</b> 1 hour Premium for every new user who completes registration through your link.\n\n` +
+      `📣 Share your link with your friends and earn free Premium!`;
 
     return ctx.reply(referralText, {
       parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "📤 Share My Link", url: `https://t.me/share/url?url=${encodeURIComponent(referralLink)}` }],
-          [{ text: "📊 My Referral Stats", callback_data: "referral_stats" }]
+          [
+            {
+              text: "📤 Share My Link",
+              url: `https://t.me/share/url?url=${encodeURIComponent(referralLink)}`
+            }
+          ],
+          [
+            {
+              text: "📊 My Referral Stats",
+              callback_data: "referral_stats"
+            }
+          ]
         ]
       }
     });
@@ -163,6 +189,7 @@ bot.hears("🎁 Refer & Earn", sendReferralScreen);
 
 bot.action("referral_stats", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
+
   try {
     const profile = await User.findOne({ telegramId: ctx.chat.id });
     if (!profile) {
@@ -176,10 +203,9 @@ bot.action("referral_stats", async (ctx) => {
 
     const statsText =
       `📊 <b>Referral Statistics</b>\n\n` +
-      `👥 <b>Total successful referrals:</b> ${profile.referralCount || 0}\n` +
+      `👥 <b>Total successful referrals:</b> ${profile.referralCount || 0}\n\n` +
       `✅ <b>Completed registrations:</b> ${referredUsers.length}\n\n` +
-      `🔗 <b>Your referral link:</b>\n` +
-      `Share your referral link to invite more users.`;
+      `⭐ <b>Reward:</b> 1 hour Premium per successful referral.`;
 
     return ctx.reply(statsText, { parse_mode: "HTML" });
   } catch (err) {
@@ -190,6 +216,7 @@ bot.action("referral_stats", async (ctx) => {
 
 bot.command("profile", async (ctx) => {
   const tId = ctx.chat.id;
+
   try {
     const profile = await User.findOne({ telegramId: tId });
     if (!profile) {
@@ -197,14 +224,23 @@ bot.command("profile", async (ctx) => {
     }
 
     const premiumActive = await ensurePremiumActive(tId);
+    const updatedProfile = await User.findOne({ telegramId: tId });
+
+    let premiumText = "Inactive";
+    if (premiumActive && updatedProfile?.premiumExpiresAt) {
+      premiumText = `Active\nExpires: ${updatedProfile.premiumExpiresAt.toLocaleString()}`;
+    }
+
     const text =
-      `Your Profile Details:\n\n` +
+      `👤 <b>Your Profile</b>\n\n` +
       `👤 Name: ${profile.name}\n` +
       `🎂 Age: ${profile.age}\n` +
       `⚥ Gender: ${profile.gender}\n` +
-      `🌟 Premium Status: ${premiumActive ? "Active" : "Inactive"}`;
+      `🌟 Premium: ${premiumText}\n` +
+      `🎁 Referrals: ${profile.referralCount || 0}`;
 
-    ctx.reply(text, {
+    return ctx.reply(text, {
+      parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
           [{ text: "✏️ Edit Name", callback_data: "edit_name" }],
@@ -214,8 +250,8 @@ bot.command("profile", async (ctx) => {
       }
     });
   } catch (err) {
-    console.error(err);
-    ctx.reply("An error occurred loading your profile parameters.").catch(() => {});
+    console.error("Profile error:", err);
+    ctx.reply("An error occurred loading your profile.").catch(() => {});
   }
 });
 
@@ -227,17 +263,18 @@ bot.action(/edit_(name|age|gender)/, async (ctx) => {
   await ctx.editMessageReplyMarkup(undefined).catch(() => {});
 
   if (field === "name") {
-    ctx.reply("Please enter your new name text below:");
+    await ctx.reply("Please enter your new name:");
     userRegistrationStates.set(tId, { step: "EDITING_NAME" });
   } else if (field === "age") {
-    ctx.reply("Please type your new numeric age value below:");
+    await ctx.reply("Please enter your new age:");
     userRegistrationStates.set(tId, { step: "EDITING_AGE" });
   } else if (field === "gender") {
-    ctx.reply("Select your new gender mapping:", {
+    await ctx.reply("Select your new gender:", {
       reply_markup: {
         inline_keyboard: [
           [{ text: "Male ♂️", callback_data: "gender_Male" }],
-          [{ text: "Female ♀️", callback_data: "gender_Female" }]
+          [{ text: "Female ♀️", callback_data: "gender_Female" }],
+          [{ text: "Other", callback_data: "gender_Other" }]
         ]
       }
     });
@@ -246,49 +283,64 @@ bot.action(/edit_(name|age|gender)/, async (ctx) => {
 
 bot.command("terms", (ctx) => {
   const termsText =
-    `Terms of Service:\n` +
+    `<b>Terms of Service</b>\n\n` +
     `1. Be respectful to your chat partners.\n` +
     `2. Do not share explicit media, spam, or scam links.\n` +
-    `3. Harassment will result in permanent service termination.`;
-  ctx.reply(termsText).catch(() => {});
+    `3. Do not harass or threaten other users.\n` +
+    `4. Misuse of the service may result in account termination.`;
+
+  ctx.reply(termsText, { parse_mode: "HTML" }).catch(() => {});
 });
 
 bot.command("help", (ctx) => {
   const helpText =
     `🤖 <b>Bot Help</b>\n\n` +
     `🚀 /start — Start bot\n` +
-    `👤 /profile — Your profile\n` +
-    `🔍 /search — Find partner\n` +
+    `👤 /profile — View profile\n` +
+    `🔍 /search — Find random partner\n` +
+    `👫 Search by Gender — Premium gender search\n` +
     `⏭️ /next — Find next partner\n` +
     `🛑 /stop — End chat\n` +
-    `🔗 /link — Share Telegram ID\n` +
+    `🔗 /link — Share Telegram username\n` +
+    `🎁 /refer — Refer & Earn\n` +
+    `💎 /pay — Premium plans\n` +
     `📜 /terms — Terms & rules\n` +
     `❓ /help — Help`;
+
   ctx.reply(helpText, { parse_mode: "HTML" }).catch(() => {});
 });
 
 const displayPayScreen = (ctx) => {
   const infoText =
-    `The advantages of being a premium user:\n\n` +
-    `No ads:\n` +
-    `ads don't be shown to premium users\n\n` +
-    `Search by gender:\n` +
-    `Premium users can search partners by gender`;
+    `⭐ <b>Premium</b>\n\n` +
+    `Premium benefits:\n\n` +
+    `🚫 No ads\n` +
+    `👫 Search by gender\n\n` +
+    `Choose a Premium plan below.\n\n` +
+    `🎁 You can also get <b>1 hour free Premium</b> for every new user you refer who completes registration.`;
 
   ctx.reply(infoText, {
+    parse_mode: "HTML",
     reply_markup: {
       inline_keyboard: [
         [{ text: "1 Day ⭐ 49", callback_data: "buy_day" }],
         [{ text: "1 Week ⭐ 99", callback_data: "buy_week" }],
-        [{ text: "1 Month ⭐ 299", callback_data: "buy_month" }]
+        [{ text: "1 Month ⭐ 299", callback_data: "buy_month" }],
+        [{ text: "🎁 Get Free VIP", callback_data: "free_vip" }]
       ]
     }
   }).catch(() => {});
 };
 
-bot.command("pay", (ctx) => displayPayScreen(ctx));
-bot.command("search", (ctx) => handleSearch(ctx, false));
-bot.hears("🔍 Search", (ctx) => handleSearch(ctx, false));
+bot.command("pay", (ctx) => {
+  displayPayScreen(ctx);
+});
+
+bot.action("free_vip", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  return sendReferralScreen(ctx);
+});
 
 function initialQueueCleanup(tId) {
   activeUsers.Male = activeUsers.Male.filter((id) => id !== tId);
@@ -297,9 +349,9 @@ function initialQueueCleanup(tId) {
   activeUsers.any = activeUsers.any.filter((id) => id !== tId);
 }
 
-const connectUsers = (ctx, userId, partnerId) => {
-  initialQueueCleanup(partnerId);
+async function connectUsers(ctx, userId, partnerId) {
   initialQueueCleanup(userId);
+  initialQueueCleanup(partnerId);
 
   pairedPartners.set(userId, partnerId);
   pairedPartners.set(partnerId, userId);
@@ -311,9 +363,9 @@ const connectUsers = (ctx, userId, partnerId) => {
   ctx.telegram.sendMessage(partnerId, "You are now connected to a partner!", {
     reply_markup: { remove_keyboard: true }
   }).catch(() => {});
-};
+}
 
-async function handleSearch(ctx, useGenderFilter = false) {
+async function handleSearch(ctx, useGenderFilter = false, selectedGender = null) {
   const tId = ctx.chat.id;
   const currentUsername = ctx.chat.username || "";
 
@@ -341,6 +393,16 @@ async function handleSearch(ctx, useGenderFilter = false) {
       return ctx.reply("You are already searching for a partner.");
     }
 
+    if (useGenderFilter) {
+      const premiumActive = await ensurePremiumActive(tId);
+      if (!premiumActive) {
+        return displayPayScreen(ctx);
+      }
+      if (!selectedGender) {
+        return ctx.reply("Please select a gender to search for.");
+      }
+    }
+
     await ctx.telegram.sendMessage(tId, "Searching for a partner..", {
       reply_markup: {
         keyboard: [[{ text: "Stop Searching.." }]],
@@ -348,41 +410,34 @@ async function handleSearch(ctx, useGenderFilter = false) {
       }
     }).catch(() => {});
 
-    const myGender = userProfile.gender;
-    const targetGender = myGender === "Male" ? "Female" : myGender === "Female" ? "Male" : "Other";
-
-    if (useGenderFilter) {
-      const premiumActive = await ensurePremiumActive(tId);
-      if (!premiumActive) return displayPayScreen(ctx);
-
-      if (activeUsers[targetGender].length > 0) {
-        return connectUsers(ctx, tId, activeUsers[targetGender].shift());
+    if (useGenderFilter && selectedGender) {
+      if (activeUsers[selectedGender].length > 0) {
+        const partnerId = activeUsers[selectedGender].shift();
+        await connectUsers(ctx, tId, partnerId);
+        return;
       }
-      if (activeUsers.any.length > 0) {
-        return connectUsers(ctx, tId, activeUsers.any.shift());
-      }
-
-      activeUsers[myGender].push(tId);
+      activeUsers[userProfile.gender].push(tId);
       return;
     }
 
     if (activeUsers.any.length > 0) {
-      return connectUsers(ctx, tId, activeUsers.any.shift());
+      const partnerId = activeUsers.any.shift();
+      await connectUsers(ctx, tId, partnerId);
+    } else {
+      activeUsers.any.push(tId);
     }
-
-    if (activeUsers[targetGender].length > 0) {
-      return connectUsers(ctx, tId, activeUsers[targetGender].shift());
-    }
-
-    activeUsers.any.push(tId);
   } catch (err) {
-    console.error(err);
+    console.error("Search error:", err);
     ctx.reply("Something went wrong while processing your search request.").catch(() => {});
   }
 }
 
+bot.command("search", (ctx) => handleSearch(ctx, false));
+bot.hears("🔍 Search", (ctx) => handleSearch(ctx, false));
+
 bot.hears("👫 Search by Gender", async (ctx) => {
   const tId = ctx.chat.id;
+
   try {
     const userProfile = await User.findOne({ telegramId: tId });
     if (!userProfile) {
@@ -390,13 +445,43 @@ bot.hears("👫 Search by Gender", async (ctx) => {
     }
 
     const premiumActive = await ensurePremiumActive(tId);
-    if (!premiumActive) return displayPayScreen(ctx);
+    if (!premiumActive) {
+      return displayPayScreen(ctx);
+    }
 
-    ctx.reply("Gender wise search is active.").catch(() => {});
-    await handleSearch(ctx, true);
+    return ctx.reply("Who do you want to chat with?", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "👨 Male", callback_data: "search_gender_Male" }],
+          [{ text: "👩 Female", callback_data: "search_gender_Female" }],
+          [{ text: "🧑 Other", callback_data: "search_gender_Other" }]
+        ]
+      }
+    });
   } catch (err) {
-    console.error(err);
-    ctx.reply("An error occurred verifying premium status.").catch(() => {});
+    console.error("Gender search selection error:", err);
+    ctx.reply("Unable to start gender search. Please try again.").catch(() => {});
+  }
+});
+
+bot.action(/^search_gender_(Male|Female|Other)$/, async (ctx) => {
+  const tId = ctx.chat.id;
+  const selectedGender = ctx.match[1];
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  try {
+    const premiumActive = await ensurePremiumActive(tId);
+    if (!premiumActive) {
+      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+      return displayPayScreen(ctx);
+    }
+
+    await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+    return handleSearch(ctx, true, selectedGender);
+  } catch (err) {
+    console.error("Gender selection error:", err);
+    ctx.reply("Something went wrong. Please try again.").catch(() => {});
   }
 });
 
@@ -421,7 +506,7 @@ bot.command("next", async (ctx) => {
     initialQueueCleanup(userId);
   }
 
-  await handleSearch(ctx, false);
+  return handleSearch(ctx, false);
 });
 
 bot.hears("Stop Searching..", (ctx) => {
@@ -437,13 +522,13 @@ bot.command("stop", (ctx) => {
   if (partnerId) {
     ctx.telegram.sendMessage(
       userId,
-      `You left the chat!!\n/search - use this to search for a new partner.`,
+      "You left the chat!\n\nUse /search to find a new partner.",
       mainMenuKeyboard
     ).catch(() => {});
 
     ctx.telegram.sendMessage(
       partnerId,
-      `Your partner left the chat!\n/search - use this to search for a new partner.`,
+      "Your partner left the chat!\n\nUse /search to find a new partner.",
       mainMenuKeyboard
     ).catch(() => {});
 
@@ -452,7 +537,7 @@ bot.command("stop", (ctx) => {
   } else {
     initialQueueCleanup(userId);
     ctx.reply(
-      `You are not in a chat!\n/search - use this to search for a new partner.`,
+      "You are not in a chat!\n\nUse /search to find a new partner.",
       mainMenuKeyboard
     ).catch(() => {});
   }
@@ -463,26 +548,27 @@ bot.command("link", (ctx) => {
   const partnerId = pairedPartners.get(userId);
 
   if (!partnerId) {
-    return ctx.reply("You are not in a chat!\n/search - use this to search for a new partner.").catch(() => {});
+    return ctx.reply("You are not in a chat!\n\nUse /search to find a partner.");
   }
 
   if (!ctx.chat.username) {
-    return ctx.reply("Set a public Telegram username first in your profile.").catch(() => {});
+    return ctx.reply("Set a public Telegram username first in your Telegram profile.");
   }
 
   ctx.telegram.sendMessage(userId, "Your username has been sent to your partner!").catch(() => {});
-  ctx.telegram.sendMessage(partnerId, `Your partner's username\n@${ctx.chat.username}`).catch(() => {});
+  ctx.telegram.sendMessage(partnerId, `Your partner's username:\n@${ctx.chat.username}`).catch(() => {});
 });
 
-const sendStarsInvoice = async (ctx, plan, dynamicTitle, dynamicAmount) => {
+const sendStarsInvoice = async (ctx, plan, title, amount) => {
   try {
+    const payload = `premium_${plan}_${ctx.chat.id}_${Date.now()}`;
     await ctx.replyWithInvoice({
-      title: dynamicTitle,
-      description: "Activate premium features and remove advertisements.",
-      payload: `premium_${plan}_${ctx.chat.id}_${Date.now()}`,
+      title,
+      description: "Premium access with gender search and an ad-free experience.",
+      payload,
       provider_token: "",
       currency: "XTR",
-      prices: [{ label: dynamicTitle, amount: dynamicAmount }]
+      prices: [{ label: title, amount }]
     });
   } catch (err) {
     console.error("Invoice deployment failure:", err);
@@ -492,17 +578,17 @@ const sendStarsInvoice = async (ctx, plan, dynamicTitle, dynamicAmount) => {
 
 bot.action("buy_day", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await sendStarsInvoice(ctx, "day", "Premium 1 Day", 49);
+  return sendStarsInvoice(ctx, "day", "Premium - 1 Day", 49);
 });
 
 bot.action("buy_week", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await sendStarsInvoice(ctx, "week", "Premium 1 Week", 99);
+  return sendStarsInvoice(ctx, "week", "Premium - 1 Week", 99);
 });
 
 bot.action("buy_month", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  await sendStarsInvoice(ctx, "month", "Premium 1 Month", 299);
+  return sendStarsInvoice(ctx, "month", "Premium - 1 Month", 299);
 });
 
 bot.on("pre_checkout_query", async (ctx) => {
@@ -519,48 +605,60 @@ bot.on("successful_payment", async (ctx) => {
   try {
     const payment = ctx.message.successful_payment;
     const payload = payment.invoice_payload;
-    let durationMs = 0;
+    const payloadParts = payload.split("_");
+    const plan = payloadParts[1];
 
-    if (payload.startsWith("premium_day_")) {
+    let durationMs;
+    if (plan === "day") {
       durationMs = 1 * 24 * 60 * 60 * 1000;
-    } else if (payload.startsWith("premium_week_")) {
+    } else if (plan === "week") {
       durationMs = 7 * 24 * 60 * 60 * 1000;
-    } else if (payload.startsWith("premium_month_")) {
+    } else if (plan === "month") {
       durationMs = 30 * 24 * 60 * 60 * 1000;
-    }
-
-    if (!durationMs) {
-      console.error("Unknown premium payment payload:", payload);
-      return ctx.reply("Payment received, but the subscription could not be identified. Please contact support.");
+    } else {
+      console.error("Unknown premium plan:", plan);
+      return ctx.reply(
+        "Payment received, but the subscription plan could not be identified. Please contact support."
+      );
     }
 
     const user = await User.findOne({ telegramId: tId });
     if (!user) {
-      return ctx.reply("Payment received, but your account could not be found. Please contact support.");
+      return ctx.reply(
+        "Payment received, but your user account could not be found. Please contact support."
+      );
     }
 
     const now = Date.now();
-    const currentExpiry = user.premiumExpiresAt && user.premiumExpiresAt.getTime() > now
-      ? user.premiumExpiresAt.getTime()
-      : now;
+    let startTime = now;
 
+    if (user.isPremium && user.premiumExpiresAt && user.premiumExpiresAt.getTime() > now) {
+      startTime = user.premiumExpiresAt.getTime();
+    }
+
+    const newExpiry = new Date(startTime + durationMs);
     user.isPremium = true;
-    user.premiumExpiresAt = new Date(currentExpiry + durationMs);
+    user.premiumExpiresAt = newExpiry;
     await user.save();
+
+    const planName = plan === "day" ? "1 Day" : plan === "week" ? "1 Week" : "1 Month";
 
     ctx.reply(
       `⭐ Payment Successful!\n\n` +
-      `Premium activated successfully.\n` +
-      `Expires: ${user.premiumExpiresAt.toLocaleString("en-IN")}`,
+      `Premium plan: ${planName}\n` +
+      `Premium expires: ${newExpiry.toLocaleString()}\n\n` +
+      `Premium benefits are now active.`,
       mainMenuKeyboard
     ).catch(() => {});
   } catch (err) {
-    console.error("Post-payment record sync failure:", err);
-    ctx.reply("Payment received, but there was an error updating your account. Please contact support.").catch(() => {});
+    console.error("Post-payment processing error:", err);
+    ctx.reply(
+      "Payment was received, but there was an error updating your premium status. Please contact support."
+    ).catch(() => {});
   }
 });
 
-bot.action(/gender_(.+)/, async (ctx) => {
+bot.action(/^gender_(Male|Female|Other)$/, async (ctx) => {
   const userId = ctx.chat.id;
   const selectedGender = ctx.match[1];
   const state = userRegistrationStates.get(userId);
@@ -578,11 +676,12 @@ bot.action(/gender_(.+)/, async (ctx) => {
     }
 
     if (!state || state.step !== "AWAITING_GENDER") {
-      return ctx.reply("Session expired. Type /start.").catch(() => {});
+      return ctx.reply("Session expired. Type /start.");
     }
 
-    const systemGeneratedUserId = `usr_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`;
+    const systemGeneratedUserId = `usr_${Math.random().toString(36).substring(2, 11)}_${Date.now()}`;
     let newReferralCode = generateReferralCode();
+
     while (await User.exists({ referralCode: newReferralCode })) {
       newReferralCode = generateReferralCode();
     }
@@ -596,41 +695,59 @@ bot.action(/gender_(.+)/, async (ctx) => {
         age: state.age,
         gender: selectedGender,
         referralCode: newReferralCode,
-        referredBy: state.referredBy || null
+        referredBy: state.referredBy || null,
+        isPremium: false,
+        premiumExpiresAt: null
       },
       { upsert: true, new: true }
     );
 
     if (state.referredBy && state.referredBy !== userId) {
-      const referredUser = await User.findOne({ telegramId: state.referredBy });
-      if (referredUser) {
-        referredUser.referralCount = (referredUser.referralCount || 0) + 1;
+      const referrer = await User.findOne({ telegramId: state.referredBy });
+
+      if (referrer) {
         const now = Date.now();
-        const currentExpiry = referredUser.premiumExpiresAt && referredUser.premiumExpiresAt.getTime() > now
-          ? referredUser.premiumExpiresAt.getTime()
-          : now;
+        let rewardStart = now;
 
-        referredUser.isPremium = true;
-        referredUser.premiumExpiresAt = new Date(currentExpiry + 60 * 60 * 1000);
-        await referredUser.save();
+        if (
+          referrer.isPremium &&
+          referrer.premiumExpiresAt &&
+          referrer.premiumExpiresAt.getTime() > now
+        ) {
+          rewardStart = referrer.premiumExpiresAt.getTime();
+        }
 
-        ctx.telegram.sendMessage(
-          referredUser.telegramId,
-          `🎉 Hurray!\n\n` +
-          `You earned ⭐ 1 hour of Premium for referring a new user!\n\n` +
-          `Premium expires: ${referredUser.premiumExpiresAt.toLocaleString("en-IN")}`
+        referrer.isPremium = true;
+        referrer.premiumExpiresAt = new Date(rewardStart + 60 * 60 * 1000);
+        referrer.referralCount = (referrer.referralCount || 0) + 1;
+        await referrer.save();
+
+        await ctx.telegram.sendMessage(
+          referrer.telegramId,
+          `🎉 <b>Hurray!</b>\n\n` +
+          `You earned ⭐ <b>1 hour of Premium</b> for referring a new user!\n\n` +
+          `Premium expires: ${referrer.premiumExpiresAt.toLocaleString()}`,
+          { parse_mode: "HTML" }
         ).catch(() => {});
       }
     }
 
     userRegistrationStates.delete(userId);
-    ctx.reply(
-      `Profile saved successfully!\nName: ${state.name}\nAge: ${state.age}\nGender: ${selectedGender}\n\nUse /search or the menu to begin!`,
-      mainMenuKeyboard
-    ).catch(() => {});
+
+    return ctx.reply(
+      `✅ <b>Profile saved successfully!</b>\n\n` +
+      `👤 Name: ${state.name}\n` +
+      `🎂 Age: ${state.age}\n` +
+      `⚥ Gender: ${selectedGender}\n\n` +
+      `Use /search or the menu to find a partner.`,
+      {
+        parse_mode: "HTML",
+        ...mainMenuKeyboard
+      }
+    );
   } catch (err) {
-    console.error(err);
-    ctx.reply("Error processing gender update. Please use /profile or /start to retry.").catch(() => {});
+    console.error("Gender callback error:", err);
+    ctx.reply("Error processing your profile. Please use /profile or /start to retry.").catch(() => {});
   }
 });
 
@@ -642,13 +759,15 @@ bot.on("message", async (ctx) => {
     const textInput = ctx.message.text ? ctx.message.text.trim() : "";
 
     if (regState.step === "AWAITING_NAME") {
-      if (!textInput) return ctx.reply("Please input a valid text name.");
+      if (!textInput) {
+        return ctx.reply("Please enter a valid name.");
+      }
       userRegistrationStates.set(userId, {
         step: "AWAITING_AGE",
         name: textInput,
         referredBy: regState.referredBy || null
       });
-      return ctx.reply("Excellent! Now, please type your age:");
+      return ctx.reply("Excellent!\n\nNow, please type your age:");
     }
 
     if (regState.step === "AWAITING_AGE") {
@@ -666,14 +785,17 @@ bot.on("message", async (ctx) => {
         reply_markup: {
           inline_keyboard: [
             [{ text: "Male ♂️", callback_data: "gender_Male" }],
-            [{ text: "Female ♀️", callback_data: "gender_Female" }]
+            [{ text: "Female ♀️", callback_data: "gender_Female" }],
+            [{ text: "Other", callback_data: "gender_Other" }]
           ]
         }
       });
     }
 
     if (regState.step === "EDITING_NAME") {
-      if (!textInput) return ctx.reply("Please input a valid text name.");
+      if (!textInput) {
+        return ctx.reply("Please input a valid name.");
+      }
       try {
         await User.findOneAndUpdate({ telegramId: userId }, { name: textInput });
         userRegistrationStates.delete(userId);
@@ -706,7 +828,10 @@ bot.on("message", async (ctx) => {
   if (partnerId) {
     ctx.telegram.copyMessage(partnerId, userId, ctx.message.message_id).catch(() => {});
   } else {
-    ctx.reply("You are not in a chat!\n/search - use this to search for a new partner.", mainMenuKeyboard).catch(() => {});
+    ctx.reply(
+      "You are not in a chat!\n\nUse /search to find a new partner.",
+      mainMenuKeyboard
+    ).catch(() => {});
   }
 });
 
@@ -728,23 +853,20 @@ app.listen(PORT, async () => {
 
     try {
       await bot.telegram.setWebhook(`${APP_URL}${SECRET_PATH}`);
-      console.log("Production Webhook active on Render!");
+      console.log("Production Webhook active!");
     } catch (err) {
       console.error("Webhook binding error:", err.message);
     }
 
     setInterval(() => {
       fetch(`${APP_URL}/ping`)
-        .then(() => console.log("Keep-awake ping sent!"))
-        .catch((err) => console.error("Keep-awake ping failed:", err.message));
+        .then(() => console.log("Keep-alive ping sent!"))
+        .catch((err) => console.error("Keep-alive ping failed:", err.message));
     }, 5 * 60 * 1000);
   } else {
-    console.log("Running locally in Long-Polling Mode. No webhooks needed.");
+    console.log("Running locally in Long-Polling Mode.");
     bot.launch().catch((err) => {
-      console.error(
-        "[Telegraf Startup Error Handled]: Failed to initiate long-polling connection:",
-        err.message || err
-      );
+      console.error("[Telegraf Startup Error]:", err.message || err);
     });
   }
 });
