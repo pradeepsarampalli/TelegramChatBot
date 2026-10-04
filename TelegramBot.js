@@ -243,7 +243,7 @@ bot.start(async (ctx) => {
         await existingUser.save();
       }
       return ctx.reply(
-        `Welcome back, ${escapeHTML(existingUser.name)}!\n\nUse /search to find a partner.`,
+        `Welcome back, ${escapeHTML(existingUser.name)}!\nUse /search to find a partner.`,
         mainMenuKeyboard
       );
     }
@@ -256,7 +256,7 @@ bot.start(async (ctx) => {
       }
     }
 
-    await ctx.reply("Welcome to the Anonymous Chat Bot!\n\nLet's create your profile.\n\nPlease type your name:");
+    await ctx.reply("Welcome to the Anonymous Chat Bot!\nComplete your profile to continue.\nPlease type your name:");
     userRegistrationStates.set(tId, { step: "AWAITING_NAME", referredBy });
   } catch (err) {
     console.error("Start error:", err);
@@ -272,11 +272,11 @@ const sendReferralScreen = async (ctx) => {
 
     const referralLink = await getReferralLink(tId);
     const referralText =
-      `🎁 <b>Refer & Earn</b>\n\n` +
+      `🎁 <b>Refer & Earn</b>\n` +
       `🔗 <b>Your referral link</b>\n` +
-      `<code>${referralLink}</code>\n\n` +
-      `👥 <b>Successful referrals:</b> ${profile.referralCount || 0}\n\n` +
-      `⭐ <b>Reward:</b> 1 hour Premium for every new user who completes registration through your link.\n\n` +
+      `<code>${referralLink}</code>\n` +
+      `👥 <b>Successful referrals:</b> ${profile.referralCount || 0}\n` +
+      `⭐ <b>Reward:</b> 1 hour Premium for every new user who completes registration through your link.\n` +
       `📣 Share your link with your friends and earn free Premium!`;
 
     return ctx.reply(referralText, {
@@ -309,9 +309,9 @@ bot.action("referral_stats", async (ctx) => {
     ).sort({ registeredAt: -1 });
 
     const statsText =
-      `📊 <b>Referral Statistics</b>\n\n` +
-      `👥 <b>Total successful referrals:</b> ${profile.referralCount || 0}\n\n` +
-      `✅ <b>Completed registrations:</b> ${referredUsers.length}\n\n` +
+      `📊 <b>Referral Statistics</b>\n` +
+      `👥 <b>Total successful referrals:</b> ${profile.referralCount || 0}\n` +
+      `✅ <b>Completed registrations:</b> ${referredUsers.length}\n` +
       `⭐ <b>Reward:</b> 1 hour Premium per successful referral.`;
 
     return ctx.reply(statsText, { parse_mode: "HTML" });
@@ -335,7 +335,7 @@ bot.command("profile", async (ctx) => {
       : "Inactive";
 
     const text =
-      `👤 <b>Your Profile</b>\n\n` +
+      `👤 <b>Your Profile</b>\n` +
       `👤 Name: ${profile.name}\n` +
       `🎂 Age: ${profile.age}\n` +
       `⚥ Gender: ${profile.gender}\n` +
@@ -386,7 +386,7 @@ bot.action(/edit_(name|age|gender)/, async (ctx) => {
 
 bot.command("terms", (ctx) => {
   const termsText =
-    `<b>Terms of Service</b>\n\n` +
+    `<b>Terms of Service</b>\n` +
     `1. Be respectful to your chat partners.\n` +
     `2. Do not share explicit media, spam, or scam links.\n` +
     `3. Do not harass or threaten other users.\n` +
@@ -396,7 +396,7 @@ bot.command("terms", (ctx) => {
 
 bot.command("help", (ctx) => {
   const helpText =
-    `🤖 <b>Bot Help</b>\n\n` +
+    `🤖 <b>Bot Help</b>\n` +
     `🚀 /start — Start bot\n` +
     `👤 /profile — View profile\n` +
     `🔍 /search — Find random partner\n` +
@@ -413,11 +413,11 @@ bot.command("help", (ctx) => {
 
 const displayPayScreen = (ctx) => {
   const infoText =
-    `⭐ <b>Premium</b>\n\n` +
-    `Premium benefits:\n\n` +
+    `⭐ <b>Premium</b>\n` +
+    `Premium benefits:\n` +
     `🚫 No ads\n` +
-    `👫 Search by gender\n\n` +
-    `Choose a Premium plan below.\n\n` +
+    `👫 Search by gender\n` +
+    `Choose a Premium plan below.\n` +
     `🎁 You can also get <b>1 hour free Premium</b> for every new user you refer who completes registration.`;
 
   ctx.reply(infoText, {
@@ -475,7 +475,7 @@ async function handleSearch(ctx, useGenderFilter = false, selectedGender = null)
     }
 
     if (pairedPartners.has(tId)) {
-      return ctx.reply("You are already connected to a partner! Use /stop to leave first.");
+      return ctx.reply("You are already connected to a partner!\nUse /stop to leave first.");
     }
 
     if (
@@ -495,7 +495,7 @@ async function handleSearch(ctx, useGenderFilter = false, selectedGender = null)
 
     await ctx.telegram.sendMessage(tId, "Searching for a partner..", {
       reply_markup: {
-        keyboard: [[{ text: "Stop Searching.." }]],
+        keyboard: [[{ text: "🚫Stop Searching" }]],
         resize_keyboard: true
       }
     }).catch(() => {});
@@ -528,7 +528,7 @@ bot.hears("👫 Search by Gender", async (ctx) => {
   const tId = ctx.chat.id;
   try {
     const userProfile = await User.findOne({ telegramId: tId });
-    if (!userProfile) return ctx.reply("You must complete your profile first! Type /start to register.");
+    if (!userProfile) return ctx.reply("You must complete your profile first!\nType /start to register.");
 
     const premiumActive = await ensurePremiumActive(tId);
     if (!premiumActive) return displayPayScreen(ctx);
@@ -570,13 +570,13 @@ bot.command("next", async (ctx) => {
   const partnerId = pairedPartners.get(userId);
 
   if (partnerId) {
-    ctx.telegram.sendMessage(userId, "You left the chat! Searching for a new partner..", {
+    ctx.telegram.sendMessage(userId, "You left the chat!\nSearching for a new partner..", {
       reply_markup: { remove_keyboard: true }
     }).catch(() => {});
 
     ctx.telegram.sendMessage(
       partnerId,
-      "Your partner left the chat! Use /search or the menu to find a new partner.",
+      "Your partner left the chat!\nUse /search to find a new partner.",
       mainMenuKeyboard
     ).catch(() => {});
 
@@ -592,7 +592,7 @@ bot.command("next", async (ctx) => {
   return handleSearch(ctx, false);
 });
 
-bot.hears("Stop Searching..", (ctx) => {
+bot.hears("🚫Stop Searching", (ctx) => {
   const userId = ctx.chat.id;
   initialQueueCleanup(userId);
   persistIdle(userId).catch((err) => console.error("Session persistence error:", err));
@@ -604,8 +604,8 @@ bot.command("stop", async (ctx) => {
   const partnerId = pairedPartners.get(userId);
 
   if (partnerId) {
-    ctx.telegram.sendMessage(userId, "You left the chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
-    ctx.telegram.sendMessage(partnerId, "Your partner left the chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
+    ctx.telegram.sendMessage(userId, "You left the chat!\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
+    ctx.telegram.sendMessage(partnerId, "Your partner left the chat!\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
 
     pairedPartners.delete(partnerId);
     pairedPartners.delete(userId);
@@ -614,7 +614,7 @@ bot.command("stop", async (ctx) => {
   } else {
     initialQueueCleanup(userId);
     await persistIdle(userId);
-    ctx.reply("You are not in a chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
+    ctx.reply("You are not in a chat!\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
   }
 });
 
@@ -622,7 +622,7 @@ bot.command("link", (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
 
-  if (!partnerId) return ctx.reply("You are not in a chat!\n\nUse /search to find a partner.");
+  if (!partnerId) return ctx.reply("You are not in a chat!\nUse /search to find a partner.");
   if (!ctx.chat.username) return ctx.reply("Set a public Telegram username first in your Telegram profile.");
 
   ctx.telegram.sendMessage(userId, "Your username has been sent to your partner!").catch(() => {});
@@ -748,9 +748,9 @@ bot.on("successful_payment", async (ctx) => {
 
     const planName = plan === "day" ? "1 Day" : plan === "week" ? "1 Week" : "1 Month";
     ctx.reply(
-      `⭐ Payment Successful!\n\n` +
+      `⭐ Payment Successful!\n` +
       `Premium plan: ${planName}\n` +
-      `Premium expires: ${newExpiry.toLocaleString()}\n\n` +
+      `Premium expires: ${newExpiry.toLocaleString()}\n` +
       `Premium benefits are now active.`,
       mainMenuKeyboard
     ).catch(() => {});
@@ -818,8 +818,8 @@ bot.action(/^gender_(Male|Female|Other)$/, async (ctx) => {
 
         await ctx.telegram.sendMessage(
           referrer.telegramId,
-          `🎉 <b>Hurray!</b>\n\n` +
-          `You earned ⭐ <b>1 hour of Premium</b> for referring a new user!\n\n` +
+          `🎉 <b>Hurray!</b>\n` +
+          `You earned ⭐ <b>1 hour of Premium</b> for referring a new user!\n` +
           `Premium expires: ${referrer.premiumExpiresAt.toLocaleString()}`,
           { parse_mode: "HTML" }
         ).catch(() => {});
@@ -828,10 +828,10 @@ bot.action(/^gender_(Male|Female|Other)$/, async (ctx) => {
 
     userRegistrationStates.delete(userId);
     return ctx.reply(
-      `✅ <b>Profile saved successfully!</b>\n\n` +
+      `✅ <b>Profile saved successfully!</b>\n` +
       `👤 Name: ${escapeHTML(state.name)}\n` +
       `🎂 Age: ${state.age}\n` +
-      `⚥ Gender: ${selectedGender}\n\n` +
+      `⚥ Gender: ${selectedGender}\n` +
       `Use /search or the menu to find a partner.`,
       { parse_mode: "HTML", ...mainMenuKeyboard }
     );
@@ -855,7 +855,7 @@ bot.on("message", async (ctx) => {
         name: textInput,
         referredBy: regState.referredBy || null
       });
-      return ctx.reply("Excellent!\n\nNow, please type your age:");
+      return ctx.reply("please type your age:");
     }
 
     if (regState.step === "AWAITING_AGE") {
@@ -914,7 +914,7 @@ bot.on("message", async (ctx) => {
   if (partnerId) {
     ctx.telegram.copyMessage(partnerId, userId, ctx.message.message_id).catch(() => {});
   } else {
-    ctx.reply("You are not in a chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
+    ctx.reply("You are not in a chat!\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
   }
 });
 
