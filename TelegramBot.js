@@ -6,10 +6,17 @@ import mongoose from "mongoose";
 
 dotEnv.config({ path: "./.env" });
 
-mongoose
-  .connect(process.env.MONGO_URI || "")
-  .then(() => console.log("Connected to MongoDB Atlas successfully!"))
-  .catch((err) => console.error("MongoDB connection error:", err));
+const MONGO_OPTIONS = {
+  maxPoolSize: 10,
+  minPoolSize: 1,
+  serverSelectionTimeoutMS: 10000,
+  maxIdleTimeMS: 60000
+};
+
+const connectMongo = async () => {
+  await mongoose.connect(process.env.MONGO_URI || "", MONGO_OPTIONS);
+  console.log("Connected to MongoDB Atlas successfully!");
+};
 
 const userSchema = new mongoose.Schema({
   telegramId: { type: Number, required: true, unique: true },
@@ -23,32 +30,160 @@ const userSchema = new mongoose.Schema({
   referralCode: { type: String, unique: true, sparse: true, index: true },
   referredBy: { type: Number, default: null, index: true },
   referralCount: { type: Number, default: 0 },
-  registeredAt: { type: Date, default: Date.now }
+  registeredAt: { type: Date, default: Date.now },
+  sessionStatus: { type: String, enum: ["idle", "searching", "chatting"], default: "idle", index: true },
+  searchType: { type: String, enum: ["any", "gender"], default: null },
+  searchGender: { type: String, enum: ["Male", "Female", "Other"], default: null },
+  partnerTelegramId: { type: Number, default: null, index: true },
+  lastActivityAt: { type: Date, default: Date.now, index: true },
+  processedPaymentIds: { type: [String], default: [] }
 });
 
 const User = mongoose.model("User", userSchema);
-
 const bot = new Telegraf(process.env.Token || "");
 
 bot.catch((err, ctx) => {
   console.error(`[Telegraf Error] update_id: ${ctx?.update?.update_id}:`, err.message || err);
 });
 
-const limitConfig = {
+bot.use(rateLimit({
   window: 2000,
   limit: 5,
   onLimitExceeded: (ctx) => ctx.reply("Please avoid spamming the bot!").catch(() => {})
-};
-
-bot.use(rateLimit(limitConfig));
+}));
 
 const userRegistrationStates = new Map();
 const pairedPartners = new Map();
-const activeUsers = {
-  Male: [],
-  Female: [],
-  Other: [],
-  any: []
+const activeUsers = { Male: [], Female: [], Other: [], any: [] };
+const SEARCH_SESSION_TTL_MS = 15 * 60 * 1000;
+
+const escapeHTML = (val) =>
+  String(val ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const persistIdle = async (telegramId) => {
+  await User.updateOne(
+    { telegramId },
+    {
+      $set: {
+        sessionStatus: "idle",
+        searchType: null,
+        searchGender: null,
+        partnerTelegramId: null,
+        lastActivityAt: new Date()
+      }
+    }
+  );
+};
+
+const persistSearching = async (telegramId, searchType, searchGender = null) => {
+  await User.updateOne(
+    { telegramId },
+    {
+      $set: {
+        sessionStatus: "searching",
+        searchType,
+        searchGender,
+        partnerTelegramId: null,
+        lastActivityAt: new Date()
+      }
+    }
+  );
+};
+
+const persistPair = async (userId, partnerId) => {
+  const now = new Date();
+  await User.bulkWrite([
+    {
+      updateOne: {
+        filter: { telegramId: userId },
+        update: {
+          $set: {
+            sessionStatus: "chatting",
+            searchType: null,
+            searchGender: null,
+            partnerTelegramId: partnerId,
+            lastActivityAt: now
+          }
+        }
+      }
+    },
+    {
+      updateOne: {
+        filter: { telegramId: partnerId },
+        update: {
+          $set: {
+            sessionStatus: "chatting",
+            searchType: null,
+            searchGender: null,
+            partnerTelegramId: userId,
+            lastActivityAt: now
+          }
+        }
+      }
+    }
+  ]);
+};
+
+const recoverRuntimeState = async () => {
+  for (const key of Object.keys(activeUsers)) activeUsers[key] = [];
+  pairedPartners.clear();
+
+  const now = Date.now();
+  const sessions = await User.find({
+    sessionStatus: { $in: ["searching", "chatting"] }
+  }).select("telegramId sessionStatus searchType searchGender partnerTelegramId lastActivityAt").lean();
+
+  const byId = new Map(sessions.map((user) => [user.telegramId, user]));
+  const staleSearches = [];
+
+  for (const user of sessions) {
+    if (user.sessionStatus === "searching") {
+      const lastActivity = user.lastActivityAt?.getTime?.() || 0;
+      if (!lastActivity || now - lastActivity > SEARCH_SESSION_TTL_MS) {
+        staleSearches.push(user.telegramId);
+        continue;
+      }
+      if (user.searchType === "gender" && ["Male", "Female", "Other"].includes(user.gender)) {
+        activeUsers[user.gender].push(user.telegramId);
+      } else {
+        activeUsers.any.push(user.telegramId);
+      }
+    }
+  }
+
+  for (const user of sessions) {
+    if (user.sessionStatus !== "chatting") continue;
+    const partner = byId.get(user.partnerTelegramId);
+    if (partner && partner.sessionStatus === "chatting" && partner.partnerTelegramId === user.telegramId) {
+      pairedPartners.set(user.telegramId, user.partnerTelegramId);
+    } else {
+      staleSearches.push(user.telegramId);
+    }
+  }
+
+  if (staleSearches.length) {
+    await User.updateMany(
+      { telegramId: { $in: staleSearches } },
+      {
+        $set: {
+          sessionStatus: "idle",
+          searchType: null,
+          searchGender: null,
+          partnerTelegramId: null,
+          lastActivityAt: new Date()
+        }
+      }
+    );
+  }
+
+  console.log(
+    `Runtime state recovered: ${activeUsers.any.length + activeUsers.Male.length + activeUsers.Female.length + activeUsers.Other.length} searching, ${pairedPartners.size / 2} chats.`
+  );
 };
 
 const mainMenuKeyboard = {
@@ -61,15 +196,13 @@ const mainMenuKeyboard = {
   }
 };
 
-function generateReferralCode() {
-  return Math.random().toString(36).substring(2, 10).toUpperCase();
-}
+const generateReferralCode = () => Math.random().toString(36).substring(2, 10).toUpperCase();
 
 const getReferralLink = async (telegramId) => {
   const user = await User.findOne({ telegramId });
   if (!user) return null;
 
-  if (!user.referralCode) {
+  if (!user.referralCode || user.referralCode === String(user.telegramId)) {
     let newCode = generateReferralCode();
     while (await User.exists({ referralCode: newCode })) {
       newCode = generateReferralCode();
@@ -84,16 +217,14 @@ const getReferralLink = async (telegramId) => {
 
 const ensurePremiumActive = async (telegramId) => {
   const user = await User.findOne({ telegramId });
-  if (!user) return false;
-  if (!user.isPremium) return false;
+  if (!user || !user.isPremium) return false;
 
-  if (user.premiumExpiresAt && user.premiumExpiresAt.getTime() <= Date.now()) {
+  if (!user.premiumExpiresAt || user.premiumExpiresAt.getTime() <= Date.now()) {
     user.isPremium = false;
     user.premiumExpiresAt = null;
     await user.save();
     return false;
   }
-
   return true;
 };
 
@@ -112,7 +243,7 @@ bot.start(async (ctx) => {
         await existingUser.save();
       }
       return ctx.reply(
-        `Welcome back, ${existingUser.name}!\n\nUse /search to find a partner.`,
+        `Welcome back, ${escapeHTML(existingUser.name)}!\n\nUse /search to find a partner.`,
         mainMenuKeyboard
       );
     }
@@ -125,16 +256,8 @@ bot.start(async (ctx) => {
       }
     }
 
-    await ctx.reply(
-      "Welcome to the Anonymous Chat Bot!\n\n" +
-      "Let's create your profile.\n\n" +
-      "Please type your name:"
-    );
-
-    userRegistrationStates.set(tId, {
-      step: "AWAITING_NAME",
-      referredBy
-    });
+    await ctx.reply("Welcome to the Anonymous Chat Bot!\n\nLet's create your profile.\n\nPlease type your name:");
+    userRegistrationStates.set(tId, { step: "AWAITING_NAME", referredBy });
   } catch (err) {
     console.error("Start error:", err);
     ctx.reply("An error occurred. Please try /start again.").catch(() => {});
@@ -143,12 +266,9 @@ bot.start(async (ctx) => {
 
 const sendReferralScreen = async (ctx) => {
   const tId = ctx.chat.id;
-
   try {
     const profile = await User.findOne({ telegramId: tId });
-    if (!profile) {
-      return ctx.reply("You must complete your profile first! Type /start to register.");
-    }
+    if (!profile) return ctx.reply("You must complete your profile first! Type /start to register.");
 
     const referralLink = await getReferralLink(tId);
     const referralText =
@@ -163,18 +283,8 @@ const sendReferralScreen = async (ctx) => {
       parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
-          [
-            {
-              text: "📤 Share My Link",
-              url: `https://t.me/share/url?url=${encodeURIComponent(referralLink)}`
-            }
-          ],
-          [
-            {
-              text: "📊 My Referral Stats",
-              callback_data: "referral_stats"
-            }
-          ]
+          [{ text: "📤 Share My Link", url: `https://t.me/share/url?url=${encodeURIComponent(referralLink)}` }],
+          [{ text: "📊 My Referral Stats", callback_data: "referral_stats" }]
         ]
       }
     });
@@ -189,12 +299,9 @@ bot.hears("🎁 Refer & Earn", sendReferralScreen);
 
 bot.action("referral_stats", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-
   try {
     const profile = await User.findOne({ telegramId: ctx.chat.id });
-    if (!profile) {
-      return ctx.reply("You must complete your profile first! Type /start to register.");
-    }
+    if (!profile) return ctx.reply("You must complete your profile first! Type /start to register.");
 
     const referredUsers = await User.find(
       { referredBy: ctx.chat.id },
@@ -216,20 +323,16 @@ bot.action("referral_stats", async (ctx) => {
 
 bot.command("profile", async (ctx) => {
   const tId = ctx.chat.id;
-
   try {
     const profile = await User.findOne({ telegramId: tId });
-    if (!profile) {
-      return ctx.reply("You must complete your profile first! Type /start to register.");
-    }
+    if (!profile) return ctx.reply("You must complete your profile first! Type /start to register.");
 
     const premiumActive = await ensurePremiumActive(tId);
     const updatedProfile = await User.findOne({ telegramId: tId });
 
-    let premiumText = "Inactive";
-    if (premiumActive && updatedProfile?.premiumExpiresAt) {
-      premiumText = `Active\nExpires: ${updatedProfile.premiumExpiresAt.toLocaleString()}`;
-    }
+    const premiumText = premiumActive && updatedProfile?.premiumExpiresAt
+      ? `Active\nExpires: ${updatedProfile.premiumExpiresAt.toLocaleString()}`
+      : "Inactive";
 
     const text =
       `👤 <b>Your Profile</b>\n\n` +
@@ -288,7 +391,6 @@ bot.command("terms", (ctx) => {
     `2. Do not share explicit media, spam, or scam links.\n` +
     `3. Do not harass or threaten other users.\n` +
     `4. Misuse of the service may result in account termination.`;
-
   ctx.reply(termsText, { parse_mode: "HTML" }).catch(() => {});
 });
 
@@ -306,7 +408,6 @@ bot.command("help", (ctx) => {
     `💎 /pay — Premium plans\n` +
     `📜 /terms — Terms & rules\n` +
     `❓ /help — Help`;
-
   ctx.reply(helpText, { parse_mode: "HTML" }).catch(() => {});
 });
 
@@ -332,9 +433,7 @@ const displayPayScreen = (ctx) => {
   }).catch(() => {});
 };
 
-bot.command("pay", (ctx) => {
-  displayPayScreen(ctx);
-});
+bot.command("pay", displayPayScreen);
 
 bot.action("free_vip", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -355,14 +454,11 @@ async function connectUsers(ctx, userId, partnerId) {
 
   pairedPartners.set(userId, partnerId);
   pairedPartners.set(partnerId, userId);
+  await persistPair(userId, partnerId);
 
-  ctx.telegram.sendMessage(userId, "You are now connected to a partner!", {
-    reply_markup: { remove_keyboard: true }
-  }).catch(() => {});
-
-  ctx.telegram.sendMessage(partnerId, "You are now connected to a partner!", {
-    reply_markup: { remove_keyboard: true }
-  }).catch(() => {});
+  const msgOpts = { reply_markup: { remove_keyboard: true } };
+  ctx.telegram.sendMessage(userId, "You are now connected to a partner!", msgOpts).catch(() => {});
+  ctx.telegram.sendMessage(partnerId, "You are now connected to a partner!", msgOpts).catch(() => {});
 }
 
 async function handleSearch(ctx, useGenderFilter = false, selectedGender = null) {
@@ -371,9 +467,7 @@ async function handleSearch(ctx, useGenderFilter = false, selectedGender = null)
 
   try {
     const userProfile = await User.findOne({ telegramId: tId });
-    if (!userProfile) {
-      return ctx.reply("You must complete your profile first! Type /start to register.");
-    }
+    if (!userProfile) return ctx.reply("You must complete your profile first! Type /start to register.");
 
     if (userProfile.username !== currentUsername) {
       userProfile.username = currentUsername;
@@ -395,12 +489,8 @@ async function handleSearch(ctx, useGenderFilter = false, selectedGender = null)
 
     if (useGenderFilter) {
       const premiumActive = await ensurePremiumActive(tId);
-      if (!premiumActive) {
-        return displayPayScreen(ctx);
-      }
-      if (!selectedGender) {
-        return ctx.reply("Please select a gender to search for.");
-      }
+      if (!premiumActive) return displayPayScreen(ctx);
+      if (!selectedGender) return ctx.reply("Please select a gender to search for.");
     }
 
     await ctx.telegram.sendMessage(tId, "Searching for a partner..", {
@@ -412,19 +502,18 @@ async function handleSearch(ctx, useGenderFilter = false, selectedGender = null)
 
     if (useGenderFilter && selectedGender) {
       if (activeUsers[selectedGender].length > 0) {
-        const partnerId = activeUsers[selectedGender].shift();
-        await connectUsers(ctx, tId, partnerId);
-        return;
+        return connectUsers(ctx, tId, activeUsers[selectedGender].shift());
       }
       activeUsers[userProfile.gender].push(tId);
+      await persistSearching(tId, "gender", selectedGender);
       return;
     }
 
     if (activeUsers.any.length > 0) {
-      const partnerId = activeUsers.any.shift();
-      await connectUsers(ctx, tId, partnerId);
+      await connectUsers(ctx, tId, activeUsers.any.shift());
     } else {
       activeUsers.any.push(tId);
+      await persistSearching(tId, "any");
     }
   } catch (err) {
     console.error("Search error:", err);
@@ -437,17 +526,12 @@ bot.hears("🔍 Search", (ctx) => handleSearch(ctx, false));
 
 bot.hears("👫 Search by Gender", async (ctx) => {
   const tId = ctx.chat.id;
-
   try {
     const userProfile = await User.findOne({ telegramId: tId });
-    if (!userProfile) {
-      return ctx.reply("You must complete your profile first! Type /start to register.");
-    }
+    if (!userProfile) return ctx.reply("You must complete your profile first! Type /start to register.");
 
     const premiumActive = await ensurePremiumActive(tId);
-    if (!premiumActive) {
-      return displayPayScreen(ctx);
-    }
+    if (!premiumActive) return displayPayScreen(ctx);
 
     return ctx.reply("Who do you want to chat with?", {
       reply_markup: {
@@ -467,17 +551,13 @@ bot.hears("👫 Search by Gender", async (ctx) => {
 bot.action(/^search_gender_(Male|Female|Other)$/, async (ctx) => {
   const tId = ctx.chat.id;
   const selectedGender = ctx.match[1];
-
   await ctx.answerCbQuery().catch(() => {});
 
   try {
     const premiumActive = await ensurePremiumActive(tId);
-    if (!premiumActive) {
-      await ctx.editMessageReplyMarkup(undefined).catch(() => {});
-      return displayPayScreen(ctx);
-    }
-
     await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+
+    if (!premiumActive) return displayPayScreen(ctx);
     return handleSearch(ctx, true, selectedGender);
   } catch (err) {
     console.error("Gender selection error:", err);
@@ -502,8 +582,11 @@ bot.command("next", async (ctx) => {
 
     pairedPartners.delete(partnerId);
     pairedPartners.delete(userId);
+    await persistIdle(partnerId);
+    await persistIdle(userId);
   } else {
     initialQueueCleanup(userId);
+    await persistIdle(userId);
   }
 
   return handleSearch(ctx, false);
@@ -512,34 +595,26 @@ bot.command("next", async (ctx) => {
 bot.hears("Stop Searching..", (ctx) => {
   const userId = ctx.chat.id;
   initialQueueCleanup(userId);
+  persistIdle(userId).catch((err) => console.error("Session persistence error:", err));
   ctx.reply("Stopped searching for a partner.", mainMenuKeyboard).catch(() => {});
 });
 
-bot.command("stop", (ctx) => {
+bot.command("stop", async (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
 
   if (partnerId) {
-    ctx.telegram.sendMessage(
-      userId,
-      "You left the chat!\n\nUse /search to find a new partner.",
-      mainMenuKeyboard
-    ).catch(() => {});
-
-    ctx.telegram.sendMessage(
-      partnerId,
-      "Your partner left the chat!\n\nUse /search to find a new partner.",
-      mainMenuKeyboard
-    ).catch(() => {});
+    ctx.telegram.sendMessage(userId, "You left the chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
+    ctx.telegram.sendMessage(partnerId, "Your partner left the chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
 
     pairedPartners.delete(partnerId);
     pairedPartners.delete(userId);
+    await persistIdle(partnerId);
+    await persistIdle(userId);
   } else {
     initialQueueCleanup(userId);
-    ctx.reply(
-      "You are not in a chat!\n\nUse /search to find a new partner.",
-      mainMenuKeyboard
-    ).catch(() => {});
+    await persistIdle(userId);
+    ctx.reply("You are not in a chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
   }
 });
 
@@ -547,13 +622,8 @@ bot.command("link", (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
 
-  if (!partnerId) {
-    return ctx.reply("You are not in a chat!\n\nUse /search to find a partner.");
-  }
-
-  if (!ctx.chat.username) {
-    return ctx.reply("Set a public Telegram username first in your Telegram profile.");
-  }
+  if (!partnerId) return ctx.reply("You are not in a chat!\n\nUse /search to find a partner.");
+  if (!ctx.chat.username) return ctx.reply("Set a public Telegram username first in your Telegram profile.");
 
   ctx.telegram.sendMessage(userId, "Your username has been sent to your partner!").catch(() => {});
   ctx.telegram.sendMessage(partnerId, `Your partner's username:\n@${ctx.chat.username}`).catch(() => {});
@@ -561,11 +631,10 @@ bot.command("link", (ctx) => {
 
 const sendStarsInvoice = async (ctx, plan, title, amount) => {
   try {
-    const payload = `premium_${plan}_${ctx.chat.id}_${Date.now()}`;
     await ctx.replyWithInvoice({
       title,
       description: "Premium access with gender search and an ad-free experience.",
-      payload,
+      payload: `premium_${plan}_${ctx.chat.id}_${Date.now()}`,
       provider_token: "",
       currency: "XTR",
       prices: [{ label: title, amount }]
@@ -576,26 +645,50 @@ const sendStarsInvoice = async (ctx, plan, title, amount) => {
   }
 };
 
-bot.action("buy_day", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
+bot.action("buy_day", (ctx) => {
+  ctx.answerCbQuery().catch(() => {});
   return sendStarsInvoice(ctx, "day", "Premium - 1 Day", 49);
 });
 
-bot.action("buy_week", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
+bot.action("buy_week", (ctx) => {
+  ctx.answerCbQuery().catch(() => {});
   return sendStarsInvoice(ctx, "week", "Premium - 1 Week", 99);
 });
 
-bot.action("buy_month", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
+bot.action("buy_month", (ctx) => {
+  ctx.answerCbQuery().catch(() => {});
   return sendStarsInvoice(ctx, "month", "Premium - 1 Month", 299);
 });
 
 bot.on("pre_checkout_query", async (ctx) => {
   try {
-    await ctx.answerPreCheckoutQuery(true);
+    const query = ctx.update.pre_checkout_query;
+    const parts = (query.invoice_payload || "").split("_");
+    const plan = parts[1];
+    const invoiceUserId = Number(parts[2]);
+    const expectedAmounts = { day: 49, week: 99, month: 299 };
+
+    const valid =
+      parts.length === 4 &&
+      parts[0] === "premium" &&
+      ["day", "week", "month"].includes(plan) &&
+      Number.isSafeInteger(invoiceUserId) &&
+      invoiceUserId === query.from.id &&
+      query.currency === "XTR" &&
+      query.total_amount === expectedAmounts[plan];
+
+    await ctx.answerPreCheckoutQuery(valid);
+    if (!valid) {
+      console.error("Rejected invalid pre-checkout query:", {
+        userId: query.from.id,
+        currency: query.currency,
+        amount: query.total_amount,
+        payload: query.invoice_payload
+      });
+    }
   } catch (err) {
     console.error("Pre-checkout verification failure:", err);
+    await ctx.answerPreCheckoutQuery(false, "Invalid payment request.").catch(() => {});
   }
 });
 
@@ -604,45 +697,56 @@ bot.on("successful_payment", async (ctx) => {
 
   try {
     const payment = ctx.message.successful_payment;
-    const payload = payment.invoice_payload;
-    const payloadParts = payload.split("_");
+    const payloadParts = (payment.invoice_payload || "").split("_");
     const plan = payloadParts[1];
+    const invoiceUserId = Number(payloadParts[2]);
+    const expectedAmounts = { day: 49, week: 99, month: 299 };
 
-    let durationMs;
-    if (plan === "day") {
-      durationMs = 1 * 24 * 60 * 60 * 1000;
-    } else if (plan === "week") {
-      durationMs = 7 * 24 * 60 * 60 * 1000;
-    } else if (plan === "month") {
-      durationMs = 30 * 24 * 60 * 60 * 1000;
-    } else {
+    if (
+      payloadParts.length !== 4 ||
+      payloadParts[0] !== "premium" ||
+      invoiceUserId !== tId ||
+      !expectedAmounts[plan] ||
+      payment.currency !== "XTR" ||
+      payment.total_amount !== expectedAmounts[plan]
+    ) {
+      console.error("Invalid successful payment payload:", payment);
+      return ctx.reply("Payment verification failed. Please contact support.");
+    }
+
+    const durationMap = {
+      day: 1 * 24 * 60 * 60 * 1000,
+      week: 7 * 24 * 60 * 60 * 1000,
+      month: 30 * 24 * 60 * 60 * 1000
+    };
+    const durationMs = durationMap[plan];
+
+    if (!durationMs) {
       console.error("Unknown premium plan:", plan);
-      return ctx.reply(
-        "Payment received, but the subscription plan could not be identified. Please contact support."
-      );
+      return ctx.reply("Payment received, but the subscription plan could not be identified. Please contact support.");
     }
 
     const user = await User.findOne({ telegramId: tId });
-    if (!user) {
-      return ctx.reply(
-        "Payment received, but your user account could not be found. Please contact support."
-      );
-    }
+    if (!user) return ctx.reply("Payment received, but your user account could not be found. Please contact support.");
+
+    const chargeId = payment.telegram_payment_charge_id || payment.provider_payment_charge_id;
+    if (chargeId && user.processedPaymentIds?.includes(chargeId)) return;
 
     const now = Date.now();
-    let startTime = now;
-
-    if (user.isPremium && user.premiumExpiresAt && user.premiumExpiresAt.getTime() > now) {
-      startTime = user.premiumExpiresAt.getTime();
-    }
+    const startTime = (user.isPremium && user.premiumExpiresAt && user.premiumExpiresAt.getTime() > now)
+      ? user.premiumExpiresAt.getTime()
+      : now;
 
     const newExpiry = new Date(startTime + durationMs);
     user.isPremium = true;
     user.premiumExpiresAt = newExpiry;
+
+    if (chargeId) {
+      user.processedPaymentIds = [...(user.processedPaymentIds || []), chargeId].slice(-20);
+    }
     await user.save();
 
     const planName = plan === "day" ? "1 Day" : plan === "week" ? "1 Week" : "1 Month";
-
     ctx.reply(
       `⭐ Payment Successful!\n\n` +
       `Premium plan: ${planName}\n` +
@@ -652,9 +756,7 @@ bot.on("successful_payment", async (ctx) => {
     ).catch(() => {});
   } catch (err) {
     console.error("Post-payment processing error:", err);
-    ctx.reply(
-      "Payment was received, but there was an error updating your premium status. Please contact support."
-    ).catch(() => {});
+    ctx.reply("Payment was received, but there was an error updating your premium status. Please contact support.").catch(() => {});
   }
 });
 
@@ -681,7 +783,6 @@ bot.action(/^gender_(Male|Female|Other)$/, async (ctx) => {
 
     const systemGeneratedUserId = `usr_${Math.random().toString(36).substring(2, 11)}_${Date.now()}`;
     let newReferralCode = generateReferralCode();
-
     while (await User.exists({ referralCode: newReferralCode })) {
       newReferralCode = generateReferralCode();
     }
@@ -704,18 +805,11 @@ bot.action(/^gender_(Male|Female|Other)$/, async (ctx) => {
 
     if (state.referredBy && state.referredBy !== userId) {
       const referrer = await User.findOne({ telegramId: state.referredBy });
-
       if (referrer) {
         const now = Date.now();
-        let rewardStart = now;
-
-        if (
-          referrer.isPremium &&
-          referrer.premiumExpiresAt &&
-          referrer.premiumExpiresAt.getTime() > now
-        ) {
-          rewardStart = referrer.premiumExpiresAt.getTime();
-        }
+        const rewardStart = (referrer.isPremium && referrer.premiumExpiresAt && referrer.premiumExpiresAt.getTime() > now)
+          ? referrer.premiumExpiresAt.getTime()
+          : now;
 
         referrer.isPremium = true;
         referrer.premiumExpiresAt = new Date(rewardStart + 60 * 60 * 1000);
@@ -733,17 +827,13 @@ bot.action(/^gender_(Male|Female|Other)$/, async (ctx) => {
     }
 
     userRegistrationStates.delete(userId);
-
     return ctx.reply(
       `✅ <b>Profile saved successfully!</b>\n\n` +
-      `👤 Name: ${state.name}\n` +
+      `👤 Name: ${escapeHTML(state.name)}\n` +
       `🎂 Age: ${state.age}\n` +
       `⚥ Gender: ${selectedGender}\n\n` +
       `Use /search or the menu to find a partner.`,
-      {
-        parse_mode: "HTML",
-        ...mainMenuKeyboard
-      }
+      { parse_mode: "HTML", ...mainMenuKeyboard }
     );
   } catch (err) {
     console.error("Gender callback error:", err);
@@ -759,9 +849,7 @@ bot.on("message", async (ctx) => {
     const textInput = ctx.message.text ? ctx.message.text.trim() : "";
 
     if (regState.step === "AWAITING_NAME") {
-      if (!textInput) {
-        return ctx.reply("Please enter a valid name.");
-      }
+      if (!textInput) return ctx.reply("Please enter a valid name.");
       userRegistrationStates.set(userId, {
         step: "AWAITING_AGE",
         name: textInput,
@@ -793,13 +881,11 @@ bot.on("message", async (ctx) => {
     }
 
     if (regState.step === "EDITING_NAME") {
-      if (!textInput) {
-        return ctx.reply("Please input a valid name.");
-      }
+      if (!textInput) return ctx.reply("Please input a valid name.");
       try {
         await User.findOneAndUpdate({ telegramId: userId }, { name: textInput });
         userRegistrationStates.delete(userId);
-        return ctx.reply(`Name updated to: ${textInput}`, mainMenuKeyboard);
+        return ctx.reply(`Name updated to: ${escapeHTML(textInput)}`, mainMenuKeyboard);
       } catch (err) {
         console.error(err);
         return ctx.reply("Error updating name. Type /profile to retry.");
@@ -828,10 +914,7 @@ bot.on("message", async (ctx) => {
   if (partnerId) {
     ctx.telegram.copyMessage(partnerId, userId, ctx.message.message_id).catch(() => {});
   } else {
-    ctx.reply(
-      "You are not in a chat!\n\nUse /search to find a new partner.",
-      mainMenuKeyboard
-    ).catch(() => {});
+    ctx.reply("You are not in a chat!\n\nUse /search to find a new partner.", mainMenuKeyboard).catch(() => {});
   }
 });
 
@@ -844,29 +927,34 @@ app.use(express.json());
 app.get("/", (req, res) => res.send("Bot status: Operational."));
 app.get("/ping", (req, res) => res.send("pong"));
 
-app.listen(PORT, async () => {
-  console.log(`Server listening on port ${PORT}`);
+const startApplication = async () => {
+  try {
+    await connectMongo();
+    await recoverRuntimeState();
 
-  if (IS_PRODUCTION && APP_URL) {
-    const SECRET_PATH = `/telegraf/${bot.secretPathComponent()}`;
-    app.use(bot.webhookCallback(SECRET_PATH));
-
-    try {
+    if (IS_PRODUCTION && APP_URL) {
+      const SECRET_PATH = `/telegraf/${bot.secretPathComponent()}`;
+      app.use(bot.webhookCallback(SECRET_PATH));
       await bot.telegram.setWebhook(`${APP_URL}${SECRET_PATH}`);
       console.log("Production Webhook active!");
-    } catch (err) {
-      console.error("Webhook binding error:", err.message);
+
+      setInterval(() => {
+        fetch(`${APP_URL}/ping`)
+          .then(() => console.log("Keep-alive ping sent!"))
+          .catch((err) => console.error("Keep-alive ping failed:", err.message));
+      }, 5 * 60 * 1000);
+    } else {
+      console.log("Running locally in Long-Polling Mode.");
+      await bot.launch();
     }
 
-    setInterval(() => {
-      fetch(`${APP_URL}/ping`)
-        .then(() => console.log("Keep-alive ping sent!"))
-        .catch((err) => console.error("Keep-alive ping failed:", err.message));
-    }, 5 * 60 * 1000);
-  } else {
-    console.log("Running locally in Long-Polling Mode.");
-    bot.launch().catch((err) => {
-      console.error("[Telegraf Startup Error]:", err.message || err);
+    app.listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
     });
+  } catch (err) {
+    console.error("Application startup failed:", err);
+    process.exit(1);
   }
-});
+};
+
+startApplication();
