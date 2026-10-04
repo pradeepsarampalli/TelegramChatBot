@@ -36,10 +36,10 @@ const limitConfig = {
 };
 bot.use(rateLimit(limitConfig));
 
+// to preserve the state of user in future connections
 const userRegistrationStates = new Map(); 
+//map to store connected pairs
 const pairedPartners = new Map();       
-
-// Structured RAM Queues for processing gender-filtered matching pools
 const activeUsers = {
   Male: [],
   Female: [],
@@ -56,7 +56,7 @@ const mainMenuKeyboard = {
   }
 };
 
-// Initiates profile registration workflow or greets existing users after updating their handles.
+// initialising command
 bot.start(async (ctx) => {
   const tId = ctx.chat.id;
   const currentUsername = ctx.chat.username || "";
@@ -69,7 +69,7 @@ bot.start(async (ctx) => {
         existingUser.username = currentUsername;
         await existingUser.save();
       }
-      return ctx.reply(`Welcome back, ${existingUser.name}! Choose an action below: \search - To connect with Male`, mainMenuKeyboard);
+      return ctx.reply(`Welcome back, ${existingUser.name}! \n/search - To start search for a partner.`, mainMenuKeyboard);
     }
 
     ctx.reply("Welcome to the ChatBot! Set up your profile to continue.\nPlease type your name:");
@@ -148,11 +148,7 @@ No ads:
 ads don't be shown to premium users
 
 Search by gender:
-Premium users can search partners by gender
-
-Support the chat:
-This is the most valuable part of premium subscription. 
-The more you support us, the less ads we send`;
+Premium users can search partners by gender`;
 
   ctx.reply(infoText, {
     reply_markup: {
@@ -171,7 +167,7 @@ bot.command("pay", (ctx) => {
 bot.command("search", (ctx) => handleSearch(ctx, false));
 bot.hears("🔍 Search", (ctx) => handleSearch(ctx, false));
 
-// Helper function to thoroughly clear a specific user ID from all matching queues.
+
 function initialQueueCleanup(tId) {
   activeUsers.Male = activeUsers.Male.filter(id => id !== tId);
   activeUsers.Female = activeUsers.Female.filter(id => id !== tId);
@@ -179,7 +175,7 @@ function initialQueueCleanup(tId) {
   activeUsers.any = activeUsers.any.filter(id => id !== tId);
 }
 
-// Matches available users together in real-time or places them inside the waiting queue.
+
 async function handleSearch(ctx, useGenderFilter = false) {
   const tId = ctx.chat.id;
   const currentUsername = ctx.chat.username || "";
@@ -199,7 +195,6 @@ async function handleSearch(ctx, useGenderFilter = false) {
       return ctx.reply("You are already connected to a partner! Use /stop to leave first.");
     }
 
-    // Protection mapping to avoid double queue placement checks
     if (activeUsers.Male.includes(tId) || activeUsers.Female.includes(tId) || activeUsers.Other.includes(tId) || activeUsers.any.includes(tId)) {
       return ctx.reply("You are already searching for a partner...");
     }
@@ -209,7 +204,6 @@ async function handleSearch(ctx, useGenderFilter = false) {
       parse_mode: "Markdown"
     }).catch(() => {});
 
-    // Premium Gender-Filtered Matching Routing Path
     if (useGenderFilter && userProfile.isPremium) {
       const myGender = userProfile.gender;
       const targetGender = myGender === "Male" ? "Female" : myGender === "Female" ? "Male" : "Other";
@@ -230,7 +224,6 @@ async function handleSearch(ctx, useGenderFilter = false) {
       }
     }
 
-    // Standard Free Tier or Standard Unfiltered Matching Routing Path
     if (activeUsers.any.length > 0) {
       const partnerId = activeUsers.any.shift();
       initialQueueCleanup(partnerId);
@@ -249,7 +242,7 @@ async function handleSearch(ctx, useGenderFilter = false) {
   }
 }
 
-// Redirects paid accounts into gender queues or forwards standard free tier users to the invoice layout.
+
 bot.hears("👫 Search by Gender", async (ctx) => {
   const tId = ctx.chat.id;
 
@@ -263,7 +256,7 @@ bot.hears("👫 Search by Gender", async (ctx) => {
       return displayPayScreen(ctx);
     }
 
-    ctx.reply("Gender wise search is active. (Premium filter functional)").catch(() => {});
+    ctx.reply("Gender wise search is active.").catch(() => {});
     handleSearch(ctx, true);
   } catch (err) {
     console.error(err);
@@ -271,7 +264,7 @@ bot.hears("👫 Search by Gender", async (ctx) => {
   }
 });
 
-// Automatically terminates the active conversation pair sequence and launches a fresh search queue routing.
+
 bot.command("next", async (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
@@ -286,7 +279,6 @@ bot.command("next", async (ctx) => {
   handleSearch(ctx, false);
 });
 
-// Removes a searching user from the waiting queue layout pool.
 bot.hears("Stop Searching....", (ctx) => {
   const userId = ctx.chat.id;
   initialQueueCleanup(userId);
@@ -303,7 +295,7 @@ bot.command("stop", (ctx) => {
     pairedPartners.delete(partnerId);
     pairedPartners.delete(userId);
   } else {
-    ctx.reply(`You are not in a chat!\n/search - use this to search for a new partner😁`, mainMenuKeyboard).catch(() => {});
+    ctx.reply(`You are not in a chat!\n/search - use this to search for a new partner..`, mainMenuKeyboard).catch(() => {});
   }
 });
 
@@ -311,7 +303,7 @@ bot.command("stop", (ctx) => {
 bot.command("link", (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
-  if (!partnerId) return ctx.reply("You are not in a chat!").catch(() => {});
+  if (!partnerId) return ctx.reply("`You are not in a chat!\n/search - use this to search for a new partner..`").catch(() => {});
   if (!ctx.chat.username) return ctx.reply("Set a public Telegram username first in your profile.").catch(() => {});
   ctx.telegram.sendMessage(partnerId, "@" + ctx.chat.username).catch(() => {});
 });
@@ -456,7 +448,7 @@ bot.on("message", async (ctx) => {
   if (partnerId) {
     ctx.telegram.copyMessage(partnerId, userId, ctx.message.message_id).catch(() => {});
   } else {
-    ctx.reply("You are not in a conversation! Use /search or the menu below to find a partner.", mainMenuKeyboard).catch(() => {});
+    ctx.reply("`You are not in a chat!\n/search - use this to search for a new partner..`", mainMenuKeyboard).catch(() => {});
   }
 });
 
@@ -468,7 +460,6 @@ app.use(express.json());
 app.get("/", (req, res) => res.send("Bot status: Operational."));
 app.get("/ping", (req, res) => res.send("pong"));
 
-// Initializes the Express system service infrastructure, binding long-polling or production webhook layers.
 app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
   if (IS_PRODUCTION && APP_URL) {
