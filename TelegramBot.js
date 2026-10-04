@@ -36,9 +36,8 @@ const limitConfig = {
 };
 bot.use(rateLimit(limitConfig));
 
-// to preserve the state of user in future connections
+
 const userRegistrationStates = new Map(); 
-//map to store connected pairs
 const pairedPartners = new Map();       
 const activeUsers = {
   Male: [],
@@ -56,7 +55,7 @@ const mainMenuKeyboard = {
   }
 };
 
-// initialising command
+
 bot.start(async (ctx) => {
   const tId = ctx.chat.id;
   const currentUsername = ctx.chat.username || "";
@@ -80,7 +79,7 @@ bot.start(async (ctx) => {
   }
 });
 
-// Displays an interactive dashboard card containing current database records and edit controls.
+
 bot.command("profile", async (ctx) => {
   const tId = ctx.chat.id;
 
@@ -105,7 +104,7 @@ bot.command("profile", async (ctx) => {
   }
 });
 
-// Shifts a user state path flow directly into editing specific field targets.
+
 bot.action(/edit_(name|age|gender)/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const field = ctx.match[1];
@@ -196,11 +195,11 @@ async function handleSearch(ctx, useGenderFilter = false) {
     }
 
     if (activeUsers.Male.includes(tId) || activeUsers.Female.includes(tId) || activeUsers.Other.includes(tId) || activeUsers.any.includes(tId)) {
-      return ctx.reply("You are already searching for a partner...");
+      return ctx.reply("You are already searching for a partner.");
     }
 
-    ctx.telegram.sendMessage(tId, "Searching for a partner....", {
-      reply_markup: { keyboard: [[{ text: 'Stop Searching....' }]], resize_keyboard: true },
+    await ctx.telegram.sendMessage(tId, "Searching for a partner..", {
+      reply_markup: { keyboard: [[{ text: 'Stop Searching..' }]], resize_keyboard: true },
       parse_mode: "Markdown"
     }).catch(() => {});
 
@@ -215,8 +214,26 @@ async function handleSearch(ctx, useGenderFilter = false) {
         pairedPartners.set(tId, partnerId);
         pairedPartners.set(partnerId, tId);
 
-        ctx.telegram.sendMessage(tId, "You are now connected to a partner matching your choice!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
-        ctx.telegram.sendMessage(partnerId, "You are now connected to a partner matching your choice!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+        ctx.telegram.sendMessage(tId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+        ctx.telegram.sendMessage(partnerId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+        return;
+      } else if (activeUsers.any.length > 0) {
+        for (let i = 0; i < activeUsers.any.length; i++) {
+          const potentialPartnerId = activeUsers.any[i];
+          const partnerProfile = await User.findOne({ telegramId: potentialPartnerId });
+
+          if (partnerProfile && (partnerProfile.gender === targetGender || targetGender === "Other")) {
+            activeUsers.any.splice(i, 1);
+            
+            pairedPartners.set(tId, potentialPartnerId);
+            pairedPartners.set(potentialPartnerId, tId);
+
+            ctx.telegram.sendMessage(tId, "You are now connected to a partner", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+            ctx.telegram.sendMessage(potentialPartnerId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+            return;
+          }
+        }
+        activeUsers[myGender].push(tId);
         return;
       } else {
         activeUsers[myGender].push(tId);
@@ -224,15 +241,28 @@ async function handleSearch(ctx, useGenderFilter = false) {
       }
     }
 
-    if (activeUsers.any.length > 0) {
+    const myGender = userProfile.gender;
+    const targetGender = myGender === "Male" ? "Female" : myGender === "Female" ? "Male" : "Other";
+
+
+    if (activeUsers[targetGender].length > 0) {
+      const partnerId = activeUsers[targetGender].shift();
+      initialQueueCleanup(partnerId);
+
+      pairedPartners.set(tId, partnerId);
+      pairedPartners.set(partnerId, tId);
+
+      ctx.telegram.sendMessage(tId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+      ctx.telegram.sendMessage(partnerId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+    } else if (activeUsers.any.length > 0) {
       const partnerId = activeUsers.any.shift();
       initialQueueCleanup(partnerId);
 
       pairedPartners.set(tId, partnerId);
       pairedPartners.set(partnerId, tId);
 
-      ctx.telegram.sendMessage(tId, "You are now connected....", { reply_markup: { remove_keyboard: true } }).catch(() => {});
-      ctx.telegram.sendMessage(partnerId, "You are now connected....", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+      ctx.telegram.sendMessage(tId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+      ctx.telegram.sendMessage(partnerId, "You are now connected to a partner!", { reply_markup: { remove_keyboard: true } }).catch(() => {});
     } else {
       activeUsers.any.push(tId);
     }
@@ -269,7 +299,7 @@ bot.command("next", async (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
   if (partnerId) {
-    ctx.telegram.sendMessage(userId, "You left the chat! Searching for a new partner...", { reply_markup: { remove_keyboard: true } }).catch(() => {});
+    ctx.telegram.sendMessage(userId, "You left the chat! Searching for a new partner..", { reply_markup: { remove_keyboard: true } }).catch(() => {});
     ctx.telegram.sendMessage(partnerId, "Your partner left the chat! Use /search or the menu to find a new partner.", mainMenuKeyboard).catch(() => {});
     pairedPartners.delete(partnerId);
     pairedPartners.delete(userId);
@@ -279,36 +309,37 @@ bot.command("next", async (ctx) => {
   handleSearch(ctx, false);
 });
 
-bot.hears("Stop Searching....", (ctx) => {
+bot.hears("Stop Searching..", (ctx) => {
   const userId = ctx.chat.id;
   initialQueueCleanup(userId);
   ctx.reply("Stopped searching for a partner.", mainMenuKeyboard).catch(() => {});
 });
 
-// Terminates an active connection between paired users and resets their states.
+
 bot.command("stop", (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
   if (partnerId) {
-    ctx.telegram.sendMessage(userId, `You left the chat!!\n/search - use this to search for a new partner...`, mainMenuKeyboard).catch(() => {});
-    ctx.telegram.sendMessage(partnerId, `Your partner left the chat!\n/search - use this to search for a new partner....`, mainMenuKeyboard).catch(() => {});
+    ctx.telegram.sendMessage(userId, `You left the chat!!\n/search - use this to search for a new partner.`, mainMenuKeyboard).catch(() => {});
+    ctx.telegram.sendMessage(partnerId, `Your partner left the chat!\n/search - use this to search for a new partner.`, mainMenuKeyboard).catch(() => {});
     pairedPartners.delete(partnerId);
     pairedPartners.delete(userId);
   } else {
-    ctx.reply(`You are not in a chat!\n/search - use this to search for a new partner..`, mainMenuKeyboard).catch(() => {});
+    ctx.reply(`You are not in a chat!\n/search - use this to search for a new partner.`, mainMenuKeyboard).catch(() => {});
   }
 });
 
-// Shares the current user's public Telegram handle with their connected partner.
+
 bot.command("link", (ctx) => {
   const userId = ctx.chat.id;
   const partnerId = pairedPartners.get(userId);
-  if (!partnerId) return ctx.reply("`You are not in a chat!\n/search - use this to search for a new partner..`").catch(() => {});
+  if (!partnerId) return ctx.reply("`You are not in a chat!\n/search - use this to search for a new partner.`").catch(() => {});
   if (!ctx.chat.username) return ctx.reply("Set a public Telegram username first in your profile.").catch(() => {});
-  ctx.telegram.sendMessage(partnerId, "@" + ctx.chat.username).catch(() => {});
+  ctx.telegram.sendMessage(userId,"Your username has been sent to your partner!").catch(() => {});
+  ctx.telegram.sendMessage(partnerId,"Your partner's username\n"+"@" + ctx.chat.username).catch(() => {});
 });
 
-// Generates an automated invoice configuration parameters payload tracking Telegram Stars subscription purchases.
+// Directly infered from the telegram
 const sendStarsInvoice = async (ctx, dynamicTitle, dynamicAmount) => {
   try {
     await ctx.replyWithInvoice({
@@ -356,7 +387,7 @@ bot.on("successful_payment", async (ctx) => {
   }
 });
 
-// Processes selected gender values and updates profile metrics or initializes parameters dynamically.
+
 bot.action(/gender_(.+)/, async (ctx) => {
   const userId = ctx.chat.id;
   const selectedGender = ctx.match[1];
@@ -391,7 +422,6 @@ bot.action(/gender_(.+)/, async (ctx) => {
   }
 });
 
-// Manages the conversation registration setup tracking steps or routes active structural chat copy logs.
 bot.on("message", async (ctx) => {
   const userId = ctx.chat.id;
   const regState = userRegistrationStates.get(userId);
@@ -448,7 +478,7 @@ bot.on("message", async (ctx) => {
   if (partnerId) {
     ctx.telegram.copyMessage(partnerId, userId, ctx.message.message_id).catch(() => {});
   } else {
-    ctx.reply("`You are not in a chat!\n/search - use this to search for a new partner..`", mainMenuKeyboard).catch(() => {});
+    ctx.reply("`You are not in a chat!\n/search - use this to search for a new partner.`", mainMenuKeyboard).catch(() => {});
   }
 });
 
